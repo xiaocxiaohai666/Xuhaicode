@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>预约系统 · 主页</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="app-page">
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">预约</span>
+      <span class="brand-text">预约系统</span>
+    </div>
+    <div class="user-area">
+      <span class="user-tag">用户名：<b id="nav-user-name">{{ user_name }}</b></span>
+      <span class="user-tag">手机号：<b id="nav-user-tel"></b></span>
+      <button type="button" class="btn-ghost" id="btn-logout">退出</button>
+    </div>
+  </header>
+
+  <main class="app-body">
+    <!-- 侧栏 -->
+    <nav class="sidebar">
+      <button type="button" class="nav-item active" data-view="tickets">
+        查看可预约
+      </button>
+      <button type="button" class="nav-item" data-view="mine">
+        我的预约
+      </button>
+    </nav>
+
+    <!-- 内容区 -->
+    <section class="content">
+      <div class="content-head">
+        <h2 id="view-title">可预约的票</h2>
+        <button type="button" class="btn-primary" id="btn-refresh">刷新</button>
+      </div>
+
+      <!-- 通用提示 -->
+      <div id="global-msg" class="toast"></div>
+
+      <!-- 可预约表 -->
+      <div id="view-tickets" class="view active">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>序号</th><th>名称</th><th>总票数</th>
+              <th>已预定</th><th>剩余</th><th>时间</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tb-tickets"></tbody>
+        </table>
+      </div>
+
+      <!-- 我的预约表 -->
+      <div id="view-mine" class="view">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>预约ID</th><th>名称</th><th>总票数</th>
+              <th>已预定</th><th>时间</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tb-mine"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

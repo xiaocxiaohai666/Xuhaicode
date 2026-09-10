@@ -1,0 +1,37 @@
+{
+	"folders": [
+		{
+			"name": "day16",
+			"path": "../../day16"
+		},
+		{
+			"name": "day21",
+			"path": "../../day21"
+		},
+		{
+			"name": "day22",
+			"path": "../../day22"
+		},
+		{
+			"name": "day23",
+			"path": "../../day23"
+		},
+		{
+			"name": "day24",
+			"path": "../../day24"
+		},
+		{
+			"name": "day25",
+			"path": "../../day25"
+		},
+		{
+			"name": "project",
+			"path": ".."
+		},
+		{
+			"name": "day20",
+			"path": "../../day20"
+		}
+	],
+	"settings": {}
+}

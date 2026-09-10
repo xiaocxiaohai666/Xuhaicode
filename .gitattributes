@@ -1,0 +1,4 @@
+# 本项目在 Linux 上开发、从 Windows 提交，
+# 统一强制所有文本文件以 LF 存储并检出，
+# 避免 CRLF 弄坏 shell 脚本(#!/bin/bash^M)和 Makefile。
+* text=auto eol=lf

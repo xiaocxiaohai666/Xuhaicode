@@ -1,0 +1,5 @@
+-xc++
+-std=c++17
+-I/usr/include
+-I/usr/include/jsoncpp
+-I/usr/include/mysql

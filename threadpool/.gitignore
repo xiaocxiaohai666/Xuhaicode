@@ -1,0 +1,7 @@
+# ---- 构建产物 ----
+build/
+bin/
+
+# ---- clangd 缓存与生成文件 ----
+.cache/
+compile_commands.json

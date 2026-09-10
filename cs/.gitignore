@@ -1,0 +1,18 @@
+# ---- 编译产物 ----
+# Linux 下 g++/make 默认输出的是无后缀可执行文件，这里逐个点名排除
+service
+client
+clitest
+clitest1
+main
+
+# ---- C/C++ 中间文件 ----
+*.o
+*.a
+*.so
+*.out
+*.d
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
