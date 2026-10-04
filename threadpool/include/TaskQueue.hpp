@@ -135,7 +135,6 @@ public:
       }
 
       if (result == false) {
-
         return 0;
       }
 

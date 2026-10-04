@@ -11,6 +11,7 @@
 #include <mutex>
 #include <queue>
 #include <utility>
+#include <vector>
 
 // 线程函数能访问什么取决于这个可调用对象本身的作用域/捕获/接收的指针，而不是取决于线程跑起来之后运行的线程作用域。
 
@@ -107,14 +108,10 @@ private:
 
   ctx::Taskdeque<Task> m_taskqueue;
   std::atomic<bool> m_running;
-  // a开头的是管理空闲线程id
-  std::mutex a_mutex;
-  std::queue<std::thread::id> m_exit_threads_id;
   // b开头管理的是线程数组
   std::mutex b_mutex;
-
-  // 管理线程
-  std::thread sudo;
+  // 回收站：超时后自行退出的线程对象先挪到这里，等 Stop/析构统一 join
+  std::list<std::shared_ptr<Worker>> m_dead_threads;
 
   int minithread_num;
   int maxthread_num;
@@ -129,20 +126,17 @@ private:
 
     for (int i = 0; i < thread_num_now; i++) {
       auto worker = std::make_shared<Worker>();
-      Worker *self =
-          worker.get(); // 知道自己的位置在哪里并传递给线程函数好让他改变状态。
-
-      worker->thread = std::thread(&CacheThreadPool::RuninThread, this, self);
       {
         std::lock_guard<std::mutex> lock(b_mutex);
-        m_threadsgroup.emplace_back(std::move(worker));
+        m_threadsgroup.emplace_back(worker);
       }
+      // 先入组再启动线程：保证线程超时自清理时一定能在组里找到自己。
+      // 把自身 shared_ptr 传给线程函数，线程持有自己的引用用于自清理。
+      worker->thread = std::thread(&CacheThreadPool::RuninThread, this, worker);
     }
-
-    this->sudo = std::thread(&CacheThreadPool::Sudo, this);
   }
 
-  void RuninThread(Worker *self) {
+  void RuninThread(std::shared_ptr<Worker> self) {
     while (m_running) {
       Task task;
       int result = m_taskqueue.Cache_Take(&task, timeout);
@@ -152,10 +146,20 @@ private:
         task();
         self->busy = false;
       } else if (result == 0) {
+        // 空闲超时：自己把自己挪进回收站并退出，不再需要管理线程回收。
+        // 若此刻列表已被 Stop 快照清空则找不到自己，直接退出即可。
         self->busy = false;
         {
-          std::lock_guard<std::mutex> lock(a_mutex);
-          m_exit_threads_id.push(std::this_thread::get_id());
+          std::lock_guard<std::mutex> lock(b_mutex);
+          for (auto it = m_threadsgroup.begin(); it != m_threadsgroup.end();
+               ++it) {
+            if (it->get() == self.get()) {
+              m_dead_threads.emplace_back(std::move(*it));
+              m_threadsgroup.erase(it);
+              --thread_num_now;
+              break;
+            }
+          }
         }
         return;
       } else {
@@ -169,88 +173,39 @@ private:
       return;
     }
 
-    {
-      std::unique_lock<std::mutex> locker(b_mutex);
-      ++thread_num_now;
-
-      auto worker = std::make_shared<Worker>();
-      Worker *self = worker.get();
-
-      worker->thread = std::thread(&CacheThreadPool::RuninThread, this, self);
-
-      m_threadsgroup.emplace_back(std::move(worker));
+    std::unique_lock<std::mutex> locker(b_mutex);
+    if (thread_num_now >= maxthread_num || m_running == false) {
+      return; // 持锁后复查，防止并发创建超限
     }
-  }
+    ++thread_num_now;
 
-  bool CleanupThread() {
-    std::thread::id exit_id;
-    {
-      std::lock_guard<std::mutex> lock(a_mutex);
-      if (m_exit_threads_id.empty()) {
-        return false;
-      }
-      exit_id = m_exit_threads_id.front();
-      m_exit_threads_id.pop();
-    }
-
-    std::shared_ptr<Worker> target;
-    {
-      std::lock_guard<std::mutex> lock(b_mutex);
-      for (const auto &worker : m_threadsgroup) {
-        if (worker->thread.get_id() == exit_id) {
-          target = worker;
-          break;
-        }
-      }
-    }
-
-    if (!target) {
-      return false;
-    }
-
-    if (target->thread.joinable()) {
-      target->thread.join();
-    }
-
-    {
-      std::lock_guard<std::mutex> lock(b_mutex);
-      for (auto it = m_threadsgroup.begin(); it != m_threadsgroup.end(); ++it) {
-        if (*it == target) {
-          m_threadsgroup.erase(it);
-          --thread_num_now;
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  void Sudo() { // 但是线程有空闲的情况属于正常情况
-    while (m_running) {
-      if (CleanupThread()) {
-        continue;
-      }
-      if (!m_taskqueue.Empty()) {
-        AddThread();
-      } else {
-        std::this_thread::
-            yield(); // 当前线程主动让出CPU使用权，提示操作系统可以先运行其他线程，什么时候调用它取决于操作系统
-        // 是空循环的一种优化方案。
-      }
-    }
+    auto worker = std::make_shared<Worker>();
+    // 先入组再启动线程（同 Start）：保证线程超时自清理时一定能在组里找到自己
+    m_threadsgroup.emplace_back(worker);
+    worker->thread = std::thread(&CacheThreadPool::RuninThread, this, worker);
   }
 
   void ForceStopThreadGroup() {
 
     m_running = false;
     m_taskqueue.Stop();
-    std::unique_lock<std::mutex> locker(b_mutex);
-    for (auto it = m_threadsgroup.begin(); it != m_threadsgroup.end();) {
-      if ((*it)->thread.joinable()) {
-        (*it)->thread.join();
-        --thread_num_now;
-        it = m_threadsgroup.erase(
-            it); // erase本身会返回删除元素后的下一个迭代器。
+
+    // 先把两组线程对象快照出锁再 join：若持锁 join，正在等待 b_mutex 做
+    // 自清理的超时线程会与这里互相等待形成死锁。快照后自清理发现列表
+    // 为空，直接退出，其线程对象在快照里被统一 join。
+    std::list<std::shared_ptr<Worker>> to_join;
+    {
+      std::lock_guard<std::mutex> lock(b_mutex);
+      to_join.swap(m_threadsgroup);
+      to_join.insert(to_join.end(), m_dead_threads.begin(),
+                     m_dead_threads.end());
+      m_dead_threads.clear();
+      thread_num_now = 0;
+    }
+
+    for (auto &worker : to_join) {
+      if (worker->thread.joinable()) {
+        worker->thread.join();
       }
     }
   }
@@ -265,24 +220,29 @@ public:
     Start(maxnumthread);
   }
 
-  ~CacheThreadPool() {
-    Stop();
-    if (sudo.joinable()) {
-      sudo.join();
-    }
-  }
+  ~CacheThreadPool() { Stop(); }
 
   void Stop() { ForceStopThreadGroup(); }
 
   void AddTask(const Task &task) {
     if (!m_taskqueue.Put(task)) {
       std::cout << "AddTask(const Task&) false" << std::endl;
+      return;
+    }
+    // 生产者触发扩容：有积压且未达上限才加线程
+    if (thread_num_now < maxthread_num && !m_taskqueue.Empty()) {
+      AddThread();
     }
   }
 
   void AddTask(Task &&task) {
     if (!m_taskqueue.Put(std::forward<Task &&>(task))) {
       std::cout << "AddTask(Task&&) false" << std::endl;
+      return;
+    }
+    // 生产者触发扩容：有积压且未达上限才加线程
+    if (thread_num_now < maxthread_num && !m_taskqueue.Empty()) {
+      AddThread();
     }
   }
 };
