@@ -593,7 +593,7 @@ void ConSocket::RsetEvent()
     }
 }
 
-TcpServer::TcpServer(const SerConfig &conf) : m_conf(conf), m_pool(4, 1024)
+TcpServer::TcpServer(const SerConfig &conf) : m_conf(conf), m_pool(10, 1024)
 {
 }
 

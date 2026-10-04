@@ -24,7 +24,7 @@
 
 #define d_size  1024
 
-#define thread_num 5
+#define thread_num 10
 
 #define o "ok"
 

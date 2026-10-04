@@ -15,7 +15,7 @@
 | 目录 | 版本 | 关键变化 | 从这里开始读 |
 |---|---|---|---|
 | [`csproject/`](csproject/) | **v1** | 打地基：epoll + 线程池 + JSON 协议，数据库走**短连接** | [项目说明.md](csproject/项目说明.md) |
-| [`csproject2/`](csproject2/) | **v2** | 把短连接换成 **MySQL 连接池**（5 条长连接复用） | [预约系统版本2.md](csproject2/预约系统版本2.md) |
+| [`csproject2/`](csproject2/) | **v2** | 把短连接换成 **MySQL 连接池**（10 条长连接复用），并补了 C 压测器与压测报告 | [预约系统版本2.md](csproject2/预约系统版本2.md) |
 | [`csproject2view/`](csproject2view/) | **v2 + 可视化** | 加一层 **Flask 网页界面**，浏览器直接操作 | [预约系统版本2.md](csproject2view/预约系统版本2.md) |
 | [`cs++view/`](cs++view/) | **v2 + C++11 化** | 把 pthread / 手动内存管理**彻底 C++11 化**（RAII） | [C++化改造记录.md](cs++view/C++化改造记录.md) |
 | [`project/`](project/) | **需求与早期练习** | 完整[需求文档](project/需求文档.md) + 最早的单文件实现与练习 | [需求文档.md](project/需求文档.md) |
@@ -27,7 +27,7 @@
 | 模块 | 技术 |
 |---|---|
 | 网络模型 | TCP + epoll（**LT 模式 + `EPOLLONESHOT`**） |
-| 并发模型 | Reactor + pthread 线程池（**5 个 worker** + 条件变量唤醒） |
+| 并发模型 | Reactor + pthread 线程池（**10 个 worker** + 条件变量唤醒） |
 | 数据库 | MySQL C API（**连接池** + 事务） |
 | 通信协议 | JSON over TCP（jsoncpp） |
 | 配置管理 | 纯文本 `key=value`（`service.conf` / `mysql.conf`） |
@@ -46,7 +46,7 @@
       │                 Tcp_Service                     │
       │  ┌───────────┐    ┌──────────────────────┐      │
       │  │  epoll    │───▶│   Thread_Pool         │      │
-      │  │(epoll_wait)│  │  (5 worker threads)   │      │
+      │  │(epoll_wait)│  │ (10 worker threads)   │      │
       │  └─────┬─────┘    └──────────┬───────────┘      │
       │   ┌────┴─────┐         ┌────┴────────┐          │
       │   │ listen_fd│         │  RecvSocket │          │
@@ -54,7 +54,7 @@
       │   └──────────┘         └─────┬───────┘          │
       │                    ┌─────────▼─────────┐        │
       │                    │   Connect_Pool    │        │
-      │                    │ (5 条 MySQL 长连接)│        │
+      │                    │ 10 条 MySQL 长连接 │        │
       │                    └─────────┬─────────┘        │
       └──────────────────────────────┼──────────────────┘
                                      ▼
@@ -92,7 +92,7 @@ epoll_ctl(EPOLL_CTL_DEL)  →  delete this  →  析构函数里 close(fd)
 
 ### 3. MySQL 连接池：槽位 + 引用计数
 
-服务端启动时 `Run()` **预建 5 条长连接**（账号密码读 `mysql.conf`）。每条连接是一个槽位：
+服务端启动时 `Run()` **预建 10 条长连接**（账号密码读 `mysql.conf`）。每条连接是一个槽位：
 
 ```cpp
 struct Mysql_cli {
@@ -127,8 +127,9 @@ JSON over TCP，请求带 `cmd` 字段区分动作：
 
 | 优先级 | 问题 | 改进方向 |
 |---|---|---|
-| **最高** | **连接池没有条件变量**——借不到连接直接 `return false`，第 6 个并发请求就被拒 | `Connect_Pool` 加 `pthread_cond_t`：借不到时 `cond_wait`，归还时 `cond_signal` |
-| 高 | 5 个 worker 共享 5 条连接，借/还都要加锁 | worker 启动时绑死一条连接（`__thread` / `pthread_key`），**彻底无锁** |
+| **最高** | **高并发写突发下的连接重置**——`listen_fd` 用 LT 且未挂 `EPOLLONESHOT`，主线程每轮都重复投递 `AccSocket` 任务；队列满后 `add_Task` 直接 `delete` 掉**仍有未读数据**的 `RecvSocket`，带着未读缓冲 `close` 会发 RST（读场景几乎不出现，写场景 50 并发 33 次） | 监听 fd 改 `EPOLLIN \| EPOLLONESHOT` + 处理后重挂；`add_Task` 溢出时不要 `delete` 活跃连接。详见 [csproject2/压测报告.md](csproject2/压测报告.md) 第五节「关键发现 6」 |
+| **最高** | **连接池没有条件变量**——借不到连接直接 `return false`，第 11 个并发请求就被拒 | `Connect_Pool` 加 `pthread_cond_t`：借不到时 `cond_wait`，归还时 `cond_signal` |
+| 高 | 10 个 worker 共享 10 条连接，借/还都要加锁 | worker 启动时绑死一条连接（`__thread` / `pthread_key`），**彻底无锁** |
 | 中 | epoll 用 LT + ONESHOT，每次都要 `epoll_ctl(MOD)` 重新武装 | 改 ET + 非阻塞 fd，循环 `recv` 到 `EAGAIN`，减少系统调用 |
 | 中 | 每次 `mysql_query` 拼 SQL 字符串，服务端每次都要重新 parse | 用 `mysql_stmt_prepare` + `mysql_stmt_bind_param` 预处理语句，复用执行计划 |
 | 低 | 连接池没有探活（长时间空闲后连接可能已被 MySQL 断开） | 借用前 `mysql_ping` |
@@ -154,6 +155,23 @@ cd csproject2view
 
 浏览器访问 `http://localhost:5000`。
 
+### 压测（v2）
+
+`csproject2/` 下自带两个压测器，都直接说 TCP + JSON 协议（不能用 wrk，那玩意只发 HTTP 报文）：
+
+```bash
+cd csproject2
+python3 stress_test.py login    50 20   # Python 多线程，快速跑业务场景
+python3 stress_test.py check    50 20
+python3 stress_test.py register 50 4
+python3 stress_test.py appoint  50 1    # 并发抢同一张票，查超卖
+
+gcc -O2 -pthread -o bench bench.c       # C 版长连接压测器，更接近真实 QPS
+./bench 4 25 20 login                   # <线程数> <每线程连接数> <每连接请求数> <login|check>
+```
+
+实测结果、超卖验证与连接重置的根因分析见 [csproject2/压测报告.md](csproject2/压测报告.md)。
+
 ### 依赖（Ubuntu）
 
 ```bash
@@ -171,6 +189,7 @@ pip3 install flask
 | [csproject/项目所遇到的问题.md](csproject/项目所遇到的问题.md) | v1 踩坑记录：线程池临界区、"政府大厅"类比、`EPOLLONESHOT`、`data.ptr`、**短连接 vs 长连接 vs 连接池三种方案对比** |
 | [csproject/epoll笔记.md](csproject/epoll笔记.md) | epoll 原理笔记：ADD/MOD/DEL 三个操作、ONESHOT 的"剪线"模型、`data` 是 union |
 | [csproject2/预约系统版本2.md](csproject2/预约系统版本2.md) | v2 连接池设计与各文件详解 |
+| [csproject2/压测报告.md](csproject2/压测报告.md) | v2 压测全过程：QPS/延迟数据、并发抢票超卖验证、**高并发写突发下连接重置的根因定位与改进方案** |
 | [csproject2view/预约系统版本2.md](csproject2view/预约系统版本2.md) | v2 + Flask 版：整体架构、各文件详解、改进建议与路线图 |
 | [cs++view/C++化改造记录.md](cs++view/C++化改造记录.md) | 逐处列出从 C/pthread 到 C++11 的所有改动（带源码行号） |
 | [cs++view/C++11线程与pthread对比.md](cs++view/C++11线程与pthread对比.md) | 两套线程 API 对照 + 9 类坑位总结 + 选型建议 |

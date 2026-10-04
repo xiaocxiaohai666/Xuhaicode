@@ -5,6 +5,11 @@ client
 clitest
 clitest1
 main
+bench
+
+# ---- 编译对比/回滚时留下的备份 ----
+service.new
+*.bak
 
 # ---- C/C++ 中间文件 ----
 *.o

@@ -170,7 +170,7 @@ private:
     int stop; // 线程池停止
 
     int max_queue = 1024; // 任务队列最大长度
-    int thread_num = 4;   // 线程数目
+    int thread_num = 10;   // 线程数目
 
     pthread_mutex_t mutex;
     pthread_cond_t cond;
