@@ -189,7 +189,7 @@ pip3 install flask
 | [csproject/项目所遇到的问题.md](csproject/项目所遇到的问题.md) | v1 踩坑记录：线程池临界区、"政府大厅"类比、`EPOLLONESHOT`、`data.ptr`、**短连接 vs 长连接 vs 连接池三种方案对比** |
 | [csproject/epoll笔记.md](csproject/epoll笔记.md) | epoll 原理笔记：ADD/MOD/DEL 三个操作、ONESHOT 的"剪线"模型、`data` 是 union |
 | [csproject2/预约系统版本2.md](csproject2/预约系统版本2.md) | v2 连接池设计与各文件详解 |
-| [csproject2/压测报告.md](csproject2/压测报告.md) | v2 压测全过程：QPS/延迟数据、并发抢票超卖验证、**高并发写突发下连接重置的根因定位与改进方案** |
+| [csproject2/压测报告.md](csproject2/压测报告.md) | v2 压测全过程：QPS/延迟数据、并发抢票超卖验证、**高并发写突发下连接重置的根因定位与改进方案**，以及 `-O0` / `-O2` 编译优化的同机对照复测（结论：优化基本不提速，瓶颈在 MySQL 往返与队列溢出，不在 CPU） |
 | [csproject2view/预约系统版本2.md](csproject2view/预约系统版本2.md) | v2 + Flask 版：整体架构、各文件详解、改进建议与路线图 |
 | [cs++view/C++化改造记录.md](cs++view/C++化改造记录.md) | 逐处列出从 C/pthread 到 C++11 的所有改动（带源码行号） |
 | [cs++view/C++11线程与pthread对比.md](cs++view/C++11线程与pthread对比.md) | 两套线程 API 对照 + 9 类坑位总结 + 选型建议 |
