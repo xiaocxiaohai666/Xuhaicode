@@ -1,0 +1,15 @@
+# ---- 编译产物 ----
+/build/
+/bin/
+
+# ---- C/C++ 中间文件 ----
+*.o
+*.a
+*.so
+*.out
+*.d
+
+# ---- IDE / 编译数据库 ----
+compile_commands.json
+.cache/
+.trae/
