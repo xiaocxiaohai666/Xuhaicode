@@ -4,6 +4,15 @@ project(chat_room_online)
 #导出 compile_commands.json 给 IDE/语言服务器用（它靠这个拿到 include 路径和 C++ 标准，否则满屏红线）
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+#默认开优化：build.sh 是裸跑 cmake 的，CMAKE_BUILD_TYPE 为空时整个项目按 -O0 编译，
+#压测里能差好几倍，这里兜一个默认值（-O2 + 调试信息）
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "构建类型" FORCE)
+endif()
+
+#是否启用 AES-256-GCM 加密传输；默认关，保证不改变原有行为
+option(ENABLE_CRYPTO "启用 AES-256-GCM 加密传输" ON)
+
 #配置编译选项
 set(CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} -g)
 
@@ -36,6 +45,20 @@ include_directories(${MUDUO_INCLUDE_DIR})
 #C++11 线程库需要显式链接 Threads::Threads
 find_package(Threads REQUIRED)
 
+#压测器是纯 C（用了 pthread_barrier_t 等 POSIX 接口），显式指定 C 标准；
+#不写的话 IDE 拿不到正确的编译参数，bench.c 会满屏红线
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
 #加载子目录
 add_subdirectory(src)
 #CMAkE构建的时候会在这个语句下递归跳转到所穿目录名下的CMAKE文件。
+
+#压测器单独一个目标，固定开 -O2
+add_executable(bench tools/bench.cpp ${CMAKE_SOURCE_DIR}/src/crypto.cpp)
+target_compile_options(bench PRIVATE -O2)
+target_link_libraries(bench pthread)
+if(ENABLE_CRYPTO)
+    target_compile_definitions(bench PRIVATE ENABLE_CRYPTO)
+    target_link_libraries(bench crypto)
+endif()

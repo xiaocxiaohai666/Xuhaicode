@@ -1,4 +1,5 @@
 // 聊天室服务端入口：先把数据库和业务层准备好，再启动 muduo 事件循环
+#include"crypto.hpp"
 #include"chatserver.hpp"
 #include"chatservice.hpp"
 #include"db.h"
@@ -125,6 +126,12 @@ int main(int argc,char *argv[]){
     }
 
     //必须先建好连接池，业务层后续才能直接取连接
+    //加密传输：编译期开关决定是否真的加解密；明文模式下 init 是空操作
+    if(!wire::init()){
+        cerr << "加密模块初始化失败" << endl;
+        return 1;
+    }
+
     Mysql_con_pool *pool = Mysql_con_pool::Ret_Entry();
     if(!pool->Read_Conf("") || !pool->Init_Con_vector() || !pool->Con_sql()){
         cerr << "数据库初始化失败，请检查 db.conf 与 MySQL 服务" << endl;

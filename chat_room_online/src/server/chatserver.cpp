@@ -1,3 +1,4 @@
+#include"crypto.hpp"
 #include"chatserver.hpp"
 #include"chatservice.hpp"
 
@@ -43,17 +44,13 @@ void Chat_server::on_connection(const TcpConnectionPtr &conn){
 
 void Chat_server::on_message(const TcpConnectionPtr &conn,Buffer *buf,muduo::Timestamp){
     //客户端固定以 '\n' 结尾，所以用 findEOL 而不是 findCRLF
-    while(buf->findEOL() != nullptr){
-        const char *eol = buf->findEOL();
-        string line(buf->peek(),static_cast<size_t>(eol - buf->peek()));
-        buf->retrieveUntil(eol + 1);
-
-        //兼容 Windows 客户端发来的 \r\n
-        if(!line.empty() && line.back() == '\r'){
-            line.pop_back();
-        }
-        if(!line.empty()){
-            ChatService::instance()->handle_message(conn,line);
+    //拆包统一交给 wire::decode：明文模式按 '\n' 切，加密模式按长度头切
+    size_t consumed = 0;
+    string plain;
+    while(wire::decode(buf->peek(),buf->readableBytes(),consumed,plain)){
+        buf->retrieve(consumed);
+        if(!plain.empty()){
+            ChatService::instance()->handle_message(conn,plain);
         }
     }
 
