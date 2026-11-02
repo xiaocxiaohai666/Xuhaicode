@@ -6,7 +6,7 @@ aux_source_directory(./model MODEL_LIST)
 aux_source_directory(./redis REDIS_LIST)
 
 #指定生成可执行文件，即定义一个chat_room_server的可执行目标，用后面列出的所有变量展开后的源文件来编译链接。
-add_executable(chat_room_server ${SRC_LIST} ${DB_LIST} ${MODEL_LIST} ${REDIS_LIST})
+add_executable(chat_room_server ${SRC_LIST} ${DB_LIST} ${MODEL_LIST} ${REDIS_LIST} ${CMAKE_SOURCE_DIR}/src/crypto.cpp)
 
 #把配置目录的绝对路径注入成宏 SERVER_CONF_DIR，作为运行时查找配置的默认值；
 #启动时传入的 argv[1] 优先级更高，可以覆盖它。
@@ -15,3 +15,9 @@ target_compile_definitions(chat_room_server PRIVATE SERVER_CONF_DIR="${CMAKE_CUR
 
 #指定可执行文件链接时所需要依赖的库文件
 target_link_libraries(chat_room_server ${MUDUO_NET_LIB} ${MUDUO_BASE_LIB} mysqlclient hiredis Threads::Threads)
+
+#加密传输：开了开关才链接 OpenSSL 并定义同名宏
+if(ENABLE_CRYPTO)
+    target_compile_definitions(chat_room_server PRIVATE ENABLE_CRYPTO)
+    target_link_libraries(chat_room_server crypto)
+endif()

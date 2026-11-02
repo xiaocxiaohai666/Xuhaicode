@@ -1,3 +1,4 @@
+#include"crypto.hpp"
 #include"chatservice.hpp"
 #include"db.h"
 
@@ -24,15 +25,8 @@ long long now_sec(){
 
 //把用户输入转义后再拼进 SQL；拿不到连接时返回空串，让上层直接走 Db_Error
 string esc(const string &s){
-    MYSQL *con = pool()->get_connection();
-    if(con == nullptr){
-        return string();
-    }
-    string out(s.size() * 2 + 1,'\0');
-    const unsigned long n = mysql_real_escape_string(con,&out[0],s.c_str(),
-                                                      static_cast<unsigned long>(s.size()));
-    out.resize(n);
-    return out;
+    //转义需要连接的字符集信息，由池借一条连接做完再归还，不再长期占着
+    return pool()->escape(s);
 }
 
 //查第一行第一列的整数，查不到或不是数字都返回 false
@@ -171,8 +165,10 @@ void ChatService::send_message(const TcpConnectionPtr &conn,const Message &m){
         return;
     }
     json j = m;
-    string out = j.dump();
-    out.push_back('\n');
+    string out = wire::encode(j.dump());
+    if(out.empty()){
+        return;//封装失败就丢掉这条，不发半截数据出去
+    }
     conn->send(out);
 }
 

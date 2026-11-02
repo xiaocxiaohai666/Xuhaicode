@@ -2,7 +2,7 @@
 aux_source_directory(. SRC_LIST)
 
 #指定生成可执行文件
-add_executable(chat_room_client ${SRC_LIST})
+add_executable(chat_room_client ${SRC_LIST} ${CMAKE_SOURCE_DIR}/src/crypto.cpp)
 
 #把配置目录的绝对路径注入成宏 CLIENT_CONF_DIR，作为运行时查找配置的默认值；
 #启动时传入的 argv[1] 优先级更高，可以覆盖它。
@@ -11,3 +11,8 @@ target_compile_definitions(chat_room_client PRIVATE CLIENT_CONF_DIR="${CMAKE_CUR
 
 #指定可执行文件链接时所需要依赖的库文件
 target_link_libraries(chat_room_client pthread)
+
+if(ENABLE_CRYPTO)
+    target_compile_definitions(chat_room_client PRIVATE ENABLE_CRYPTO)
+    target_link_libraries(chat_room_client crypto)
+endif()

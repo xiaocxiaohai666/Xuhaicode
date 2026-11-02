@@ -2,6 +2,7 @@
 //之前写的票务预约系统，基于票务预约系统的特殊性是可以将客户端进行串行化，即一个线程
 //但是聊天室项目，是需要实现到微信那样，接收到消息的同时也能够去发送信息，这是至少需要两个线程，这里设计两个线程
 // 协议见 include/public.hpp：JSON 正文 + '\n' 分隔符，外层统一 Message 信封
+#include"crypto.hpp"
 #include"public.hpp"
 
 #include<arpa/inet.h>
@@ -221,8 +222,8 @@ bool request(int type,const json &data,Message &rsp){
     string out = j.dump();//这是nlohman的序列化函数，将一个json对象变成Json文本字符串
 
     //这上面的两个函数相当于实现了struct结构体转换成Json文本字符串（通过Json的专用函数）
-    out.push_back('\n');//作为消息结束的分隔符
-    if(!send_all(out)){
+    out = wire::encode(out);//明文模式补 '\n'，加密模式封成长度头+密文
+    if(out.empty() || !send_all(out)){
         cout << "发送失败，连接可能已断开" << endl;
         return false;
     }
@@ -306,15 +307,12 @@ void recv_loop(){
 
         buf.append(tmp,static_cast<size_t>(n));
 
-        string::size_type pos = string::npos;
-        while((pos = buf.find('\n')) != string::npos){
-            string line = buf.substr(0,pos);
-            buf.erase(0,pos + 1);
-            if(!line.empty() && line.back() == '\r'){
-                line.pop_back();
-            }
-            if(!line.empty()){
-                dispatch_line(line);
+        size_t consumed = 0;
+        string plain;
+        while(wire::decode(buf.data(),buf.size(),consumed,plain)){
+            buf.erase(0,consumed);
+            if(!plain.empty()){
+                dispatch_line(plain);
             }
         }
 

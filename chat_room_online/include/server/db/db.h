@@ -2,8 +2,13 @@
 #define DB_H
 
 #include<mysql/mysql.h>
-#include<atomic>
+
+#include<chrono>
+#include<condition_variable>
+#include<mutex>
+#include<queue>
 #include<string>
+#include<vector>
 
 enum OPERA_MYSQL{
    add = 1,
@@ -12,81 +17,72 @@ enum OPERA_MYSQL{
    query
 };
 
-//我们这里的设计逻辑是，连接池的大小大于等于子线程的数量，每一个数据库的连接句柄由一个子线程唯一对应，不可更改，
-//通过数组查询的o（1）特性，抛弃掉之前老项目的看到“有空位就做的思路"，去掉轮询，提高运行效率。
-struct Mysql_cli{
-   MYSQL* mysql_con;//连接的数据库句柄
-   bool status;//是否被占用
-   //这里原先有一个变量是专门存储这个对应的线程id，但是，由于mudlo的线程池本质上也是由vector实现的，
-   //那么我们设计的时候，就采用相同下标为一个小单元，实现o(1)的连接池下标访问。
-};
-
-
-//固定式连接池的设计
-//设计成单例模式
+//通用连接池：空闲下标队列 + 条件变量 + RAII 归还 + 断线重建
+//与旧版的区别：连接是共享资源，谁用谁借、用完归还，不再和线程终身绑定
 class Mysql_con_pool{
-    private:
-        //数据库ip地址：
-        std::string IP;
-        //数据库端口号：
-        int Port = 0;
-
-        //默认登录账户名：
-        std::string user;
-        //登录密码：
-        std::string Passwd;
-        //登录数据库名：
-        std::string Database_name;
-        //字符集
-        std::string char_set;
-
-        //连接池数组
-        Mysql_cli* C_P_array;
-
-        //连接池的最大连接数，也就是最大的容量
-        int Max_User = 0;
-        //使用数量，也就是已经被线程领走的下标个数
-        //必须用原子变量，多个 IO 线程会同时来分配下标
-        static std::atomic<int> User_now;
-        //状态
-        bool status;
-
-        //构造函数
-        Mysql_con_pool();
+public:
+    //RAII 句柄：离开作用域自动归还，调用方不需要记着还
+    class Guard{
     public:
-       //单例模式下的静态函数接口
-        static Mysql_con_pool* Ret_Entry();
-        Mysql_con_pool(const Mysql_con_pool &)=delete;
-        Mysql_con_pool& operator=(const Mysql_con_pool &)=delete;
-        
-        //读取配置文件；path 为空时使用编译期注入的 conf 目录
-        bool Read_Conf(const std::string &path = "");
+        Guard() = default;
+        Guard(Mysql_con_pool *pool,int idx,MYSQL *con)
+            :pool_(pool),idx_(idx),con_(con){}
+        ~Guard();
+        Guard(const Guard &) = delete;
+        Guard &operator=(const Guard &) = delete;
+        Guard(Guard &&o) noexcept;
+        Guard &operator=(Guard &&o) noexcept;
 
-        //初始化连接池数组
-        bool Init_Con_vector();
+        bool valid() const { return con_ != nullptr; }
+        MYSQL *get() const { return con_; }
+        bool reconnect();
+        void release();
 
-        //析构函数
-        ~Mysql_con_pool();
-    
-        //连接函数
-        bool Con_sql();
+    private:
+        Mysql_con_pool *pool_ = nullptr;
+        int idx_ = -1;
+        MYSQL *con_ = nullptr;
+    };
 
-        //增
-        bool Add_to_sql(const std::string msg);
-        
-        //删
-        bool Del_to_sql(const std::string msg);
+    static Mysql_con_pool *Ret_Entry();
+    Mysql_con_pool(const Mysql_con_pool &) = delete;
+    Mysql_con_pool &operator=(const Mysql_con_pool &) = delete;
 
-        //改
-        bool Upd_to_sql(const std::string msg);
+    bool Read_Conf(const std::string &path = "");
+    bool Init_Con_vector();
+    bool Con_sql();
+    ~Mysql_con_pool();
 
-        //查
-        MYSQL_RES* Que_to_sql(const std::string msg);
-        
-        //返回句柄
-        MYSQL* get_connection();
+    //借一条连接，池空时最多等 timeout_ms；拿不到返回无效 Guard
+    Guard acquire(int timeout_ms = 3000);
 
+    bool Add_to_sql(const std::string &msg);
+    bool Del_to_sql(const std::string &msg);
+    bool Upd_to_sql(const std::string &msg);
+    MYSQL_RES *Que_to_sql(const std::string &msg);
+
+    //转义要用到连接的字符集信息，统一由池借一条连接来做，做完自动归还
+    std::string escape(const std::string &s);
+
+private:
+    Mysql_con_pool();
+    void release_slot(int idx);
+    MYSQL *create_one();
+    static bool conn_lost(unsigned int err);
+    bool exec_write(const char *what,const std::string &msg);
+
+    std::string IP;
+    int Port = 0;
+    std::string user;
+    std::string Passwd;
+    std::string Database_name;
+    std::string char_set;
+    int Max_User = 0;
+
+    std::vector<MYSQL*> conns_;
+    std::queue<int> idle_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
 };
-
 
 #endif

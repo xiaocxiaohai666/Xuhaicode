@@ -1,5 +1,7 @@
 #include"db.h"
 
+#include<mysql/errmsg.h>
+
 #include<cstdlib>
 #include<fstream>
 #include<iostream>
@@ -11,155 +13,270 @@ using namespace std;
 #define SERVER_CONF_DIR "."
 #endif
 
-//static 成员必须在 .cpp 里定义一次，否则链接时报 undefined reference
-atomic<int> Mysql_con_pool::User_now{0};
+namespace{
+//MySQL 客户端库要求每个用到它的线程先初始化自己的线程局部数据，每线程只做一次
+thread_local bool tls_mysql_inited = false;
 
-Mysql_con_pool::Mysql_con_pool(){
-    C_P_array = nullptr;
-    status = false;
+void ensure_thread_inited(){
+    if(!tls_mysql_inited){
+        mysql_thread_init();
+        tls_mysql_inited = true;
+    }
+}
 }
 
+Mysql_con_pool::Mysql_con_pool() = default;
+
 //单例入口：C++11 起局部静态变量的初始化是线程安全的，不需要自己加锁
-Mysql_con_pool* Mysql_con_pool::Ret_Entry(){
+Mysql_con_pool *Mysql_con_pool::Ret_Entry(){
     static Mysql_con_pool inst;
     return &inst;
 }
 
-//只分配槽位数组，不建立连接；真正的连库在 Con_sql 里做
+// ---------------- Guard：借还的载体 ----------------
+
+Mysql_con_pool::Guard::~Guard(){
+    release();
+}
+
+Mysql_con_pool::Guard::Guard(Guard &&o) noexcept
+    :pool_(o.pool_),idx_(o.idx_),con_(o.con_){
+    o.pool_ = nullptr;
+    o.idx_ = -1;
+    o.con_ = nullptr;
+}
+
+Mysql_con_pool::Guard &Mysql_con_pool::Guard::operator=(Guard &&o) noexcept{
+    if(this != &o){
+        release();
+        pool_ = o.pool_;
+        idx_ = o.idx_;
+        con_ = o.con_;
+        o.pool_ = nullptr;
+        o.idx_ = -1;
+        o.con_ = nullptr;
+    }
+    return *this;
+}
+
+void Mysql_con_pool::Guard::release(){
+    if(pool_ != nullptr && idx_ >= 0){
+        pool_->release_slot(idx_);
+    }
+    pool_ = nullptr;
+    idx_ = -1;
+    con_ = nullptr;
+}
+
+//断线重建：关掉旧的，按同一份配置重新连一条，写回池子数组
+//idx_ 由本句柄独占（已经从空闲队列里取出来了），其他线程拿不到，所以直接改不用加锁
+bool Mysql_con_pool::Guard::reconnect(){
+    if(pool_ == nullptr || idx_ < 0){
+        return false;
+    }
+    if(con_ != nullptr){
+        mysql_close(con_);
+        con_ = nullptr;
+    }
+    MYSQL *fresh = pool_->create_one();
+    if(fresh == nullptr){
+        pool_->conns_[idx_] = nullptr;
+        return false;
+    }
+    con_ = fresh;
+    pool_->conns_[idx_] = fresh;
+    return true;
+}
+
+// ---------------- 池本体 ----------------
+
 bool Mysql_con_pool::Init_Con_vector(){
     if(Max_User <= 0){
         cout << "连接池容量必须大于 0，请先读取配置" << endl;
         return false;
     }
-    //固定式连接池：一次性按容量分配好，之后只按下标访问，不增不删
-    C_P_array = new Mysql_cli[Max_User];
-    for(int i = 0;i < Max_User;++i){
-        C_P_array[i].mysql_con = nullptr;
-        C_P_array[i].status = false;//false 表示还没被线程领走
-    }
-    User_now = 0;
+    lock_guard<mutex> lk(mtx_);
+    conns_.assign(static_cast<size_t>(Max_User),nullptr);
+    queue<int> empty;
+    idle_.swap(empty);
     return true;
 }
 
-//按容量把所有槽位的连接都建好
+MYSQL *Mysql_con_pool::create_one(){
+    MYSQL *con = mysql_init(nullptr);
+    if(con == nullptr){
+        cout << "mysql_init 失败" << endl;
+        return nullptr;
+    }
+    //MySQL 不可达时不要长时间卡住调用方
+    unsigned int connect_timeout = 3;
+    mysql_options(con,MYSQL_OPT_CONNECT_TIMEOUT,&connect_timeout);
+
+    if(mysql_real_connect(con,IP.c_str(),user.c_str(),Passwd.c_str(),
+                          Database_name.c_str(),Port,nullptr,0) == nullptr){
+        cout << "建连失败: " << mysql_error(con) << endl;
+        mysql_close(con);
+        return nullptr;
+    }
+    if(mysql_set_character_set(con,char_set.c_str()) != 0){
+        cout << "设置字符集失败: " << mysql_error(con) << endl;
+        mysql_close(con);
+        return nullptr;
+    }
+    return con;
+}
+
 bool Mysql_con_pool::Con_sql(){
-    if(C_P_array == nullptr){
+    if(conns_.size() != static_cast<size_t>(Max_User)){
         cout << "连接池数组尚未初始化" << endl;
         return false;
     }
     for(int i = 0;i < Max_User;++i){
-        MYSQL* con = mysql_init(nullptr);//这是整个连接生命周期里唯一的操作入口，注意这是操作入口，不负责发起，以及断开连接的操作。
-        //实际连接是由mysql_real_connect来创建发起连接
-        if(con == nullptr){
-            cout << "第 " << i << " 个连接 mysql_init 失败" << endl;
+        MYSQL *c = create_one();
+        if(c == nullptr){
+            //一条都建不起来就整体失败，并把已经建好的关掉，不留半成品
+            for(int j = 0;j < i;++j){
+                if(conns_[j] != nullptr){
+                    mysql_close(conns_[j]);
+                    conns_[j] = nullptr;
+                }
+            }
             return false;
         }
-        //最后一个参数 0 表示用 TCP 连接；host 为 NULL 时才会走本地 socket
-        if(mysql_real_connect(con,IP.c_str(),user.c_str(),Passwd.c_str(),
-                              Database_name.c_str(),Port,nullptr,0) == nullptr){
-            cout << "第 " << i << " 个连接失败: " << mysql_error(con) << endl;
-            mysql_close(con);
-            return false;
-        }
-        //字符集必须显式设置，否则中文昵称和聊天内容会乱码
-        if(mysql_set_character_set(con,char_set.c_str()) != 0){
-            cout << "第 " << i << " 个连接设置字符集失败: " << mysql_error(con) << endl;
-            mysql_close(con);
-            return false;
-        }
-        C_P_array[i].mysql_con = con;
+        conns_[i] = c;
+    }
+
+    lock_guard<mutex> lk(mtx_);
+    for(int i = 0;i < Max_User;++i){
+        idle_.push(i);
     }
     return true;
 }
 
 Mysql_con_pool::~Mysql_con_pool(){
-    if(C_P_array == nullptr){
-        return;
-    }
-    for(int i = 0;i < Max_User;++i){
-        if(C_P_array[i].mysql_con != nullptr){
-            mysql_close(C_P_array[i].mysql_con);
-            C_P_array[i].mysql_con = nullptr;
+    for(MYSQL *c : conns_){
+        if(c != nullptr){
+            mysql_close(c);
         }
     }
-    delete[] C_P_array;
-    C_P_array = nullptr;
+    conns_.clear();
 }
 
-//每个线程第一次调用时领一个下标，之后一直用自己那个槽位
-//muduo 的 IO 线程池线程数固定，线程与下标天然一一对应，所以取连接是 O(1)，不需要轮询找空位
-MYSQL* Mysql_con_pool::get_connection(){
-    if(C_P_array == nullptr){
-        cout << "连接池尚未初始化" << endl;
-        return nullptr;
-    }
+Mysql_con_pool::Guard Mysql_con_pool::acquire(int timeout_ms){
+    ensure_thread_inited();
 
-    thread_local int slot = -1;
-    if(slot < 0){
-        const int idx = User_now.fetch_add(1);
-        if(idx >= Max_User){
-            cout << "线程数超过连接池容量 " << Max_User << "，请调大 conf 里的 pool_size" << endl;
-            return nullptr;
+    unique_lock<mutex> lk(mtx_);
+    const auto deadline = chrono::steady_clock::now() + chrono::milliseconds(timeout_ms);
+
+    for(;;){
+        //池空就等，等到有人归还或者超时
+        if(!cv_.wait_until(lk,deadline,[this]{ return !idle_.empty(); })){
+            return Guard();
         }
-        //MySQL 客户端库要求每个用到它的线程先初始化自己的线程局部数据
-        mysql_thread_init();
-        slot = idx;
-        C_P_array[slot].status = true;//true 表示这个槽位已经绑定给该线程
+        const int idx = idle_.front();
+        idle_.pop();
+
+        if(conns_[idx] != nullptr){
+            return Guard(this,idx,conns_[idx]);
+        }
+
+        //这个槽位上的连接之前坏过被清空了，锁外重建，别在持锁时做网络 IO
+        lk.unlock();
+        MYSQL *fresh = create_one();
+        lk.lock();
+        if(fresh != nullptr){
+            conns_[idx] = fresh;
+            return Guard(this,idx,fresh);
+        }
+        idle_.push(idx);//重建也失败，槽位放回去，本次直接失败
+        return Guard();
     }
-    return C_P_array[slot].mysql_con;
 }
 
-bool Mysql_con_pool::Add_to_sql(const string msg){
-    MYSQL* con = get_connection();
-    if(con == nullptr){
-        return false;
+void Mysql_con_pool::release_slot(int idx){
+    {
+        lock_guard<mutex> lk(mtx_);
+        idle_.push(idx);
     }
-    if(mysql_query(con,msg.c_str()) != 0){
-        cout << "新增失败: " << mysql_error(con) << endl;
-        return false;
-    }
-    return true;
+    cv_.notify_one();
 }
 
-bool Mysql_con_pool::Del_to_sql(const string msg){
-    MYSQL* con = get_connection();
-    if(con == nullptr){
-        return false;
-    }
-    if(mysql_query(con,msg.c_str()) != 0){
-        cout << "删除失败: " << mysql_error(con) << endl;
-        return false;
-    }
-    return true;
+//判断错误码是不是"连接没了"，只有这种才值得重连
+bool Mysql_con_pool::conn_lost(unsigned int err){
+    return err == CR_SERVER_GONE_ERROR
+        || err == CR_SERVER_LOST
+        || err == CR_CONN_HOST_ERROR
+        || err == CR_CONNECTION_ERROR;
 }
 
-bool Mysql_con_pool::Upd_to_sql(const string msg){
-    MYSQL* con = get_connection();
-    if(con == nullptr){
+bool Mysql_con_pool::exec_write(const char *what,const string &msg){
+    Guard g = acquire();
+    if(!g.valid()){
+        cout << what << "失败: 等待连接超时" << endl;
         return false;
     }
-    if(mysql_query(con,msg.c_str()) != 0){
-        cout << "更新失败: " << mysql_error(con) << endl;
-        return false;
+    if(mysql_query(g.get(),msg.c_str()) == 0){
+        return true;
     }
-    return true;
+    const unsigned int e = mysql_errno(g.get());
+    cout << what << "失败: " << mysql_error(g.get()) << endl;
+    //写操作不重试：连接断掉时语句可能已经执行过，重试会重复插入
+    //只把这条死连接换掉，让下一次请求用新的
+    if(conn_lost(e)){
+        g.reconnect();
+    }
+    return false;
 }
 
-MYSQL_RES* Mysql_con_pool::Que_to_sql(const string msg){
-    MYSQL* con = get_connection();
-    if(con == nullptr){
+bool Mysql_con_pool::Add_to_sql(const string &msg){
+    return exec_write("新增",msg);
+}
+
+bool Mysql_con_pool::Del_to_sql(const string &msg){
+    return exec_write("删除",msg);
+}
+
+bool Mysql_con_pool::Upd_to_sql(const string &msg){
+    return exec_write("更新",msg);
+}
+
+MYSQL_RES *Mysql_con_pool::Que_to_sql(const string &msg){
+    Guard g = acquire();
+    if(!g.valid()){
+        cout << "查询失败: 等待连接超时" << endl;
         return nullptr;
     }
-    if(mysql_query(con,msg.c_str()) != 0){
-        cout << "查询失败: " << mysql_error(con) << endl;
+    int retried = 0;
+    for(;;){
+        if(mysql_query(g.get(),msg.c_str()) == 0){
+            //把结果集整块取回本地，连接马上就能还回去；结果集由调用方 mysql_free_result 释放
+            MYSQL_RES *res = mysql_store_result(g.get());
+            if(res == nullptr && mysql_errno(g.get()) != 0){
+                cout << "获取结果集失败: " << mysql_error(g.get()) << endl;
+            }
+            return res;
+        }
+        const unsigned int e = mysql_errno(g.get());
+        cout << "查询失败: " << mysql_error(g.get()) << endl;
+        //读是幂等的，断线可以重连后重试一次
+        if(conn_lost(e) && retried == 0 && g.reconnect()){
+            ++retried;
+            continue;
+        }
         return nullptr;
     }
-    //把结果集整块取回本地，连接马上就能干别的；结果集由调用方 mysql_free_result 释放
-    MYSQL_RES* res = mysql_store_result(con);
-    if(res == nullptr && mysql_errno(con) != 0){
-        cout << "获取结果集失败: " << mysql_error(con) << endl;
+}
+
+string Mysql_con_pool::escape(const string &s){
+    Guard g = acquire();
+    if(!g.valid()){
+        return string();
     }
-    return res;
+    string out(s.size() * 2 + 1,'\0');
+    const unsigned long n = mysql_real_escape_string(
+        g.get(),&out[0],s.c_str(),static_cast<unsigned long>(s.size()));
+    out.resize(n);
+    return out;
 }
 
 bool Mysql_con_pool::Read_Conf(const string &path){
@@ -175,28 +292,19 @@ bool Mysql_con_pool::Read_Conf(const string &path){
     int num = 0;
     while(getline(in,line)){
         ++num;
-        //兼容 Windows 换行：getline 只去掉 \n，\r 要单独处理，例如port=3306\n\r
+        //兼容 Windows 换行：getline 只去掉 \n，\r 要单独处理
         if(!line.empty() && line.back() == '\r'){
-            line.pop_back();//尾删，删掉末尾的\r这种情况
+            line.pop_back();
         }
-
-        //无内容直接跳过
         if(line.empty() || line[0] == '#'){
             continue;
         }
-        //等价于size_t,存储等号的下标位置
         const string::size_type pos = line.find('=');
-    
-        //在string 里面npos相当于-1，也就是有内容，但是没有找到等号，那么直接显示配置错误。
         if(pos == string::npos){
             cout << file << " 第 " << num << " 行缺少等号" << endl;
             return false;
         }
-
-        //切分函数，传两个参数就是从下标0开始，取pos个字符，不含下标Pos对应的字符。
         const string key = line.substr(0,pos);
-
-        //从pos+1开始，一直取到末尾
         const string value = line.substr(pos + 1);
 
         if(key == "ip"){
@@ -219,7 +327,6 @@ bool Mysql_con_pool::Read_Conf(const string &path){
     }
 
     //保险，必须所有数据都拿到，避免缺失关键数据
-    //缺了直接失败，避免拿空密码去连库
     if(IP.empty() || Database_name.empty() || user.empty() || Passwd.empty()){
         cout << file << " 缺少必填项 ip/name/user/passwd" << endl;
         return false;
