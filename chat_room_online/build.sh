@@ -7,10 +7,21 @@ cd "$(dirname "$0")" || exit 1   #dirname "$0"表示这是脚本自身的路径�
 
 #$()这种格式叫做命令替换，bash先执行里面括号里面的命令，把输出结果当作字符串类型替换到这里，所以最外层要加一个双引号。
 
+# 加密传输默认开启，传 --no-crypto 可关闭（关闭后编译明文行协议版本，不需要链接 OpenSSL）
+CRYPTO=ON
+for arg in "$@"; do
+    case "$arg" in
+        --no-crypto) CRYPTO=OFF ;;
+        *) echo "未知参数: $arg（可用: --no-crypto）" >&2; exit 2 ;;
+    esac
+done
+
 mkdir -p "$(pwd)/build" #创建build目录，-p表示就算目录已存在也不会报错
 
 rm -rf "$(pwd)/build"/* #清空build目录里的所有文件（保留build目录本身）
 #引号用来保护空格/特殊字符；需要通配符展开的`*` 、`?` 、`[...]` 一定要放在引号外面。
 
-cd "$(pwd)/build" && cmake .. && make 
+cd "$(pwd)/build" && cmake -DENABLE_CRYPTO=${CRYPTO} .. && make -j"$(nproc)"
  # 进 build，cmake .. 读取上一级的 CMakeLists.txt 生成 Makefile，再 make 编译
+ # 显式传 -DENABLE_CRYPTO：默认值写在 CMakeLists 里，这里传是为了让 --no-crypto 生效
+ # make -j"$(nproc)" 用满所有核并行编译，比串行快数倍
