@@ -20,9 +20,9 @@ Chat_server::Chat_server(EventLoop *loop,const string &ip,uint16_t port,const st
     server_.setThreadNum(threads);
 
     //这两个回调由 muduo 在事件发生时调用，这里只做转发，业务全部交给 ChatService
-    server_.setConnectionCallback(
+    server_.setConnectionCallback(//管链接的回调
         [this](const TcpConnectionPtr &conn){ on_connection(conn); });
-    server_.setMessageCallback(
+    server_.setMessageCallback(//管数据的回调
         [this](const TcpConnectionPtr &conn,Buffer *buf,muduo::Timestamp){ on_message(conn,buf,muduo::Timestamp()); });
 }
 
@@ -42,11 +42,13 @@ void Chat_server::on_connection(const TcpConnectionPtr &conn){
     }
 }
 
-void Chat_server::on_message(const TcpConnectionPtr &conn,Buffer *buf,muduo::Timestamp){
+void Chat_server::on_message(const TcpConnectionPtr &conn,Buffer *buf,muduo::Timestamp){//服务端的收包处理
     //客户端固定以 '\n' 结尾，所以用 findEOL 而不是 findCRLF
     //拆包统一交给 wire::decode：明文模式按 '\n' 切，加密模式按长度头切
     size_t consumed = 0;
     string plain;
+
+    //decode是解包加上解密
     while(wire::decode(buf->peek(),buf->readableBytes(),consumed,plain)){
         buf->retrieve(consumed);
         if(!plain.empty()){

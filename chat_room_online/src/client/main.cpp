@@ -2,6 +2,7 @@
 //之前写的票务预约系统，基于票务预约系统的特殊性是可以将客户端进行串行化，即一个线程
 //但是聊天室项目，是需要实现到微信那样，接收到消息的同时也能够去发送信息，这是至少需要两个线程，这里设计两个线程
 // 协议见 include/public.hpp：JSON 正文 + '\n' 分隔符，外层统一 Message 信封
+//整体设计是采用类似数据库中悲观锁的设计，尽量保证安全与效率的统一
 #include"crypto.hpp"
 #include"public.hpp"
 
@@ -31,6 +32,7 @@ using namespace std;
 namespace{
 
 // ---------- 全局状态 ----------
+//之所以用g开头的原因是因为这是全局变量，方便理解，所以grobal，用g开头
 int g_fd = -1;                            // 与服务器通信的 socket
 atomic<bool> g_running{true};        // 接收线程是否继续跑（能力）
 atomic<bool> g_connected{true};      // 连接是否还在（状态）
@@ -145,7 +147,7 @@ string format_time(long long ts){//ts就是时间戳，timestamp，时间戳是�
     tm tmv{};
     localtime_r(&t,&tmv);//这个函数会将这个时间戳按照年月日来进行分解，并赋值到这个专门存储这个值的结构体
     //原来的t值并不会发生改变
-    char buf[32]{0};
+    char buf[32]{0};//为什么要用缓冲区，因为我们要将这个时间戳拼进一条消息在整体输出。
     strftime(buf,sizeof(buf),"%H:%M:%S",&tmv);//按格式化输出，%H就是24小时制
     return buf;
 }
@@ -178,6 +180,8 @@ void print_fail(const Message &rsp){
     cout << endl;
 }
 
+//send——all只负责发送的动作
+//是属于request中功能的一部分。
 bool send_all(const string &s){//将一整条消息完整的写进socket，因为缓冲区大小有限制，而要发送的信息可能会大于这个缓冲区，所以通过循环，保证包信息的连续性
     size_t sent = 0;
     while(sent < s.size()){
@@ -198,6 +202,7 @@ bool send_all(const string &s){//将一整条消息完整的写进socket，因�
     return true;
 }
 
+
 // 发送一条请求并等待对应序号的响应
 bool request(int type,const json &data,Message &rsp){
     //先看看接收模块是否开启
@@ -214,7 +219,7 @@ bool request(int type,const json &data,Message &rsp){
 
     {
         lock_guard<mutex> lk(g_rsp_mtx);
-        g_has_rsp = false;//这种资源同一时刻只能一个人改，所以必须上锁。
+        g_has_rsp = false;//这种资源同一时刻只能一个人线程改，所以必须上锁。
         g_wait_seq = req.seq;//同一个信息id
     }
 
@@ -223,7 +228,7 @@ bool request(int type,const json &data,Message &rsp){
 
     //这上面的两个函数相当于实现了struct结构体转换成Json文本字符串（通过Json的专用函数）
     out = wire::encode(out);//明文模式补 '\n'，加密模式封成长度头+密文
-    if(out.empty() || !send_all(out)){
+    if(out.empty() || !send_all(out)){//send_all在这里！
         cout << "发送失败，连接可能已断开" << endl;
         return false;
     }
@@ -247,7 +252,9 @@ bool request(int type,const json &data,Message &rsp){
 void print_push(const Message &m){
     ChatPush push;
     try{
-        push = m.data.get<ChatPush>();
+        push = m.data.get<ChatPush>();//这是将data这个json对象转换成反序列化成ChatPush结构体。
+        //`m.data.get<ChatPush>()` 能调用到你写的`from_json` ，靠的是 C++ 语言的 ADL（实参依赖查找）机制 ，并非函数包装器或虚函数。nlohmann 只是把这个机制封装成了一个约定，包装器名就叫`adl_serializer` ，名字本身就是提示。
+        //如果出现异常会使线程崩溃，所以这里我们用try,catch
     }catch(const exception &){
         cout << "\n收到一条格式不正确的推送消息" << endl;
         return;
@@ -262,11 +269,12 @@ void print_push(const Message &m){
     }
 }
 
+//接收方向，属于recv_loop中的一个功能模块，具体的接收模块
 void dispatch_line(const string &line){
     Message m;
     try{
-        json j = json::parse(line);
-        m = j.get<Message>();
+        json j = json::parse(line);//将文本形式的line转换成Json格式
+        m = j.get<Message>();//将这个JSon格式转换成Message的报文形式，好进行读取操作
     }catch(const exception &e){
         cout << "\n收到无法解析的消息: " << e.what() << endl;
         return;
@@ -307,8 +315,8 @@ void recv_loop(){
 
         buf.append(tmp,static_cast<size_t>(n));
 
-        size_t consumed = 0;
-        string plain;
+        size_t consumed = 0;//记录这一帧共占了多少字节
+        string plain;//用来接收这一帧的正文
         while(wire::decode(buf.data(),buf.size(),consumed,plain)){
             buf.erase(0,consumed);
             if(!plain.empty()){
@@ -317,6 +325,7 @@ void recv_loop(){
         }
 
         //对端一直不发分隔符时，防止缓冲区无限增长
+        //1u<<20 相当于1乘以2的20次方，结果是1048576，约等于1MB
         if(buf.size() > (1u << 20)){
             cout << "\n收到超长消息，丢弃缓冲区" << endl;
             buf.clear();

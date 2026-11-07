@@ -160,7 +160,7 @@ void Redis_client::stop(){
     close_conn();
 }
 
-int Redis_client::publish(int channel,const string &msg){
+int Redis_client::publish(int channel,const string &msg){//往频道发一条消息
     lock_guard<mutex> lk(pub_mtx_);
     if(pub_ctx_ == nullptr || !connected_){
         return -1;
@@ -180,7 +180,7 @@ int Redis_client::publish(int channel,const string &msg){
     return n;
 }
 
-bool Redis_client::subscribe(int channel){
+bool Redis_client::subscribe(int channel){//订阅某一个频道
     if(channel <= 0){
         return false;
     }
@@ -194,7 +194,7 @@ bool Redis_client::subscribe(int channel){
     return true;
 }
 
-bool Redis_client::unsubscribe(int channel){
+bool Redis_client::unsubscribe(int channel){//取消订阅
     if(channel <= 0){
         return false;
     }
@@ -210,7 +210,7 @@ bool Redis_client::is_connected() const{
     return connected_;
 }
 
-void Redis_client::flush_pending(){
+void Redis_client::flush_pending(){ //这是将pending_队列里面积压的订阅/退订指令正真发出去的函数，由接收线程调用
     deque<string> cmds;
     {
         lock_guard<mutex> lk(pend_mtx_);
@@ -227,7 +227,7 @@ void Redis_client::flush_pending(){
     }
 }
 
-bool Redis_client::send_only(redisContext *ctx,const string &cmd){
+bool Redis_client::send_only(redisContext *ctx,const string &cmd){//只负责发送命令，不读取回复
     if(ctx == nullptr){
         return false;
     }
@@ -243,7 +243,7 @@ bool Redis_client::send_only(redisContext *ctx,const string &cmd){
     return true;
 }
 
-void Redis_client::reconnect(){
+void Redis_client::reconnect(){//重连 
     close_conn();
     if(!open_conn()){
         return;
@@ -251,14 +251,14 @@ void Redis_client::reconnect(){
     resubscribe_all();
 }
 
-void Redis_client::resubscribe_all(){
+void Redis_client::resubscribe_all(){//重连后补订所有频道
     lock_guard<mutex> lk(pend_mtx_);
     for(const int channel : channels_){
         pending_.push_back("SUBSCRIBE " + to_string(channel));
     }
 }
 
-void Redis_client::recv_loop(){
+void Redis_client::recv_loop(){//接收线程
     redisReply *reply = nullptr;
 
     while(running_){

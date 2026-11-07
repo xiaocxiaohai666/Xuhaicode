@@ -18,7 +18,7 @@ Mysql_con_pool *pool(){
     return Mysql_con_pool::Ret_Entry();
 }
 
-long long now_sec(){
+long long now_sec(){//取当前的时间戳
     return chrono::duration_cast<chrono::seconds>(
         chrono::system_clock::now().time_since_epoch()).count();
 }

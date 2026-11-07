@@ -31,6 +31,7 @@ struct Server_conf{
 EventLoop *g_loop = nullptr;
 
 //信号处理里只做一件事：让事件循环退出，真正的清理放在主流程里
+//信号处理函数，当收到ctrl+c或者kill时。让它调用quit函数，让事件循环停止
 void on_signal(int){
     if(g_loop != nullptr){
         g_loop->quit();

@@ -46,7 +46,7 @@ class Redis_client{
         void set_options(const Options &opt);
 
         //必须在 start() 之前调用一次
-        void set_handler(Handler h);
+        void set_handler(Handler h);//注册回调函数的
 
         bool start();
         void stop();    //先 shutdown 打断 recv，再 join，最后 redisFree
@@ -61,17 +61,17 @@ class Redis_client{
         bool is_connected() const;
 
     private:
-        bool open_conn();
-        void close_conn();
-        void recv_loop();
-        void flush_pending();
+        bool open_conn();//创建这两个连接
+        void close_conn();//关闭连接销毁句柄
+        void recv_loop();//接收线程的主循环
+        void flush_pending();//将队列中积压的提交和未提交命令正真的发送出去
         bool send_only(redisContext *ctx,const std::string &cmd);
-        void reconnect();
+        void reconnect();//断线后重连，并补充做恢复工作
         void resubscribe_all();    //重连后按台账补订所有频道
 
         Options opt_;
-        redisContext *pub_ctx_ = nullptr; //只发
-        redisContext *sub_ctx_ = nullptr;//只收，只有接收线程碰
+        redisContext *pub_ctx_ = nullptr; //只发，由工作线程执行
+        redisContext *sub_ctx_ = nullptr;//只收，只有接收线程碰，专属于redis的线程
         std::thread recv_thread_;         //独占 sub_ctx_ 的接收线程
         
         std::atomic<bool> running_{false};
@@ -82,7 +82,7 @@ class Redis_client{
         std::deque<std::string> pending_;
         std::set<int> channels_; //订阅台账，解决重复订阅的去重问题
 
-        Handler handler_; //start之后只读
+        Handler handler_; //start之后只读，是保存回调线程的成员变量
 };
 
 

@@ -262,8 +262,40 @@ struct ChatPush {
     long long timestamp = 0;
 };
 
-// ==================== JSON 序列化 ====================
-// 客户端发请求时：json j = req;  服务端解析时：auto req = msg.data.get<AddFriendReq>();
+// ==================== JSON 序列化（nlohmann 的 ADL 定制点） ====================
+//ADL和重载是两回事，ADL是将所有同名的但在不同作用域中的函数都拉在一块做备选集，一般搭配重载进行使用，通过重载来决定实际调用的函数。
+// 下面每个 to_json / from_json 都不是普通工具函数，而是给 nlohmann/json 用的“扩展点”。
+//
+// 【为什么必须写成这个样子】
+// 库里 get<T>() 的内部流程是：
+//     get<T>() -> JSONSerializer<T>::from_json(*this) -> from_json(j, ret);
+// 最后一步是【非限定调用】（前面没有写 nlohmann::）。于是 C++ 的 ADL
+// （实参依赖查找）会顺着实参类型 ret（即 T）的关联命名空间去找同名函数，
+// 正好命中这里这一份。同理 json j = obj; 会走 json 的转换构造函数，
+// 内部也是非限定调用 to_json(j, obj)。所以名字和签名形状是库写死的，
+// 我们能决定的只有“放在哪、怎么填字段”。
+//
+// 【三条硬性约束】
+// 1. 位置：必须和目标类型在同一个命名空间（本项目全部在全局作用域）。
+//    如果塞进 nlohmann 里或别的 namespace，ADL 就找不到，编译报一大段模板错误。
+// 2. inline：头文件会被多个编译单元包含，不写 inline 会重复定义、链接报错。
+// 3. 签名：签名必须一致
+//        void to_json(json &j, const T &v);     // 第二个参数可放宽为 T &
+//        void from_json(const json &j, T &v);   // 第一个必须 const，第二个必须可写
+//    返回 void；且 T 要能默认构造（get<T>() 内部先 T ret; 再往里填）。
+//
+// 【特点】
+// - 零侵入：不用继承、不用注册、不用改类型定义，在类型旁边写完即生效。
+// - 零运行时开销：模板在编译期实例化，get<ChatPush>() 和 get<LoginRsp>()
+//   是两个独立函数，各自绑定对应的 from_json，不存在虚函数或函数指针查找。
+// - 可组合：字段里嵌套另一个已定制类型时，会递归调用那一层的 to_json/from_json。
+//
+// 【怎么被调用】
+//     json j = req;                          // -> to_json(j, req)
+//     auto req2 = msg.data.get<AddFriendReq>();  // -> from_json(msg.data, req2)
+//     j.at("name").get_to(v.name);           // 内置类型由库自己处理，无需定制
+// JSON 序列化的起点：客户端发请求时用 json j = req;，服务端解析时用 msg.data.get<T>()。
+
 
 inline void to_json(json &j, const RegisterReq &v) {
     j = json{{"name", v.name}, {"passwd", v.passwd}};

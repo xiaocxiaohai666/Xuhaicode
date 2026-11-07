@@ -15,10 +15,11 @@ using namespace std;
 
 namespace{
 //MySQL 客户端库要求每个用到它的线程先初始化自己的线程局部数据，每线程只做一次
+//thread_local修饰的变量是每个线程都拥有一个
 thread_local bool tls_mysql_inited = false;
 
 void ensure_thread_inited(){
-    if(!tls_mysql_inited){
+    if(!tls_mysql_inited){//如果未初始化，才会初始化，如果已经初始化了，那么就不初始化
         mysql_thread_init();
         tls_mysql_inited = true;
     }
@@ -46,12 +47,14 @@ Mysql_con_pool::Guard::Guard(Guard &&o) noexcept
     o.con_ = nullptr;
 }
 
-Mysql_con_pool::Guard &Mysql_con_pool::Guard::operator=(Guard &&o) noexcept{
+//赋值重载，这里是移动赋值
+Mysql_con_pool::Guard& Mysql_con_pool::Guard::operator=(Guard &&o) noexcept{
     if(this != &o){
         release();
         pool_ = o.pool_;
         idx_ = o.idx_;
         con_ = o.con_;
+        //旧借条进行初始化，销毁
         o.pool_ = nullptr;
         o.idx_ = -1;
         o.con_ = nullptr;
@@ -96,7 +99,7 @@ bool Mysql_con_pool::Init_Con_vector(){
         return false;
     }
     lock_guard<mutex> lk(mtx_);
-    conns_.assign(static_cast<size_t>(Max_User),nullptr);
+    conns_.assign(static_cast<size_t>(Max_User),nullptr);//清空原来的值，然后重新填n个相同的值，这个值就是第二个参数
     queue<int> empty;
     idle_.swap(empty);
     return true;
@@ -110,7 +113,7 @@ MYSQL *Mysql_con_pool::create_one(){
     }
     //MySQL 不可达时不要长时间卡住调用方
     unsigned int connect_timeout = 3;
-    mysql_options(con,MYSQL_OPT_CONNECT_TIMEOUT,&connect_timeout);
+    mysql_options(con,MYSQL_OPT_CONNECT_TIMEOUT,&connect_timeout);//用来设置连接数据库最多要等多久，中文就是连接超时
 
     if(mysql_real_connect(con,IP.c_str(),user.c_str(),Passwd.c_str(),
                           Database_name.c_str(),Port,nullptr,0) == nullptr){
@@ -166,6 +169,7 @@ Mysql_con_pool::Guard Mysql_con_pool::acquire(int timeout_ms){
     ensure_thread_inited();
 
     unique_lock<mutex> lk(mtx_);
+    //时间戳
     const auto deadline = chrono::steady_clock::now() + chrono::milliseconds(timeout_ms);
 
     for(;;){
@@ -193,6 +197,7 @@ Mysql_con_pool::Guard Mysql_con_pool::acquire(int timeout_ms){
     }
 }
 
+//release是释放的意思也就是归还连接的意思，归还连接，那么这个连接就已经释放了，不需要了，所以放入到空闲数组中
 void Mysql_con_pool::release_slot(int idx){
     {
         lock_guard<mutex> lk(mtx_);
@@ -209,7 +214,7 @@ bool Mysql_con_pool::conn_lost(unsigned int err){
         || err == CR_CONNECTION_ERROR;
 }
 
-bool Mysql_con_pool::exec_write(const char *what,const string &msg){
+bool Mysql_con_pool::exec_write(const char *what,const string &msg){//这是执行写 这一大类的SQL通用函数，增删改都调用这个接口
     Guard g = acquire();
     if(!g.valid()){
         cout << what << "失败: 等待连接超时" << endl;
@@ -267,13 +272,15 @@ MYSQL_RES *Mysql_con_pool::Que_to_sql(const string &msg){
     }
 }
 
+//转义用户输入并防止sql注入
+//
 string Mysql_con_pool::escape(const string &s){
     Guard g = acquire();
     if(!g.valid()){
         return string();
     }
     string out(s.size() * 2 + 1,'\0');
-    const unsigned long n = mysql_real_escape_string(
+    const unsigned long n = mysql_real_escape_string(//这是Mysql自带的转义函数，负责把危险字符加上反斜杠，并返回转义后的长度
         g.get(),&out[0],s.c_str(),static_cast<unsigned long>(s.size()));
     out.resize(n);
     return out;
